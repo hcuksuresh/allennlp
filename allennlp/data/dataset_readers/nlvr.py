@@ -3,7 +3,9 @@ import json
 import logging
 
 from overrides import overrides
+import tqdm
 
+from allennlp.common import Params
 from allennlp.common.util import JsonDict
 from allennlp.data.instance import Instance
 from allennlp.data.fields import Field, TextField, ListField, IndexField, LabelField
@@ -97,13 +99,12 @@ class NlvrDatasetReader(DatasetReader):
     def _read(self, file_path: str):
         with open(file_path, "r") as data_file:
             logger.info("Reading instances from lines in file: %s", file_path)
-            for line in data_file:
+            for line in tqdm.tqdm(data_file):
                 line = line.strip("\n")
                 if not line:
                     continue
                 data = json.loads(line)
                 sentence = data["sentence"]
-                identifier = data["identifier"] if "identifier" in data else data["id"]
                 if "worlds" in data:
                     # This means that we are reading grouped nlvr data. There will be multiple
                     # worlds and corresponding labels per sentence.
@@ -126,8 +127,7 @@ class NlvrDatasetReader(DatasetReader):
                 instance = self.text_to_instance(sentence,
                                                  structured_representations,
                                                  labels,
-                                                 target_sequences,
-                                                 identifier)
+                                                 target_sequences)
                 if instance is not None:
                     yield instance
 
@@ -136,8 +136,7 @@ class NlvrDatasetReader(DatasetReader):
                          sentence: str,
                          structured_representations: List[List[List[JsonDict]]],
                          labels: List[str] = None,
-                         target_sequences: List[List[str]] = None,
-                         identifier: str = None) -> Instance:
+                         target_sequences: List[List[str]] = None) -> Instance:
         """
         Parameters
         ----------
@@ -151,8 +150,6 @@ class NlvrDatasetReader(DatasetReader):
         target_sequences : ``List[List[str]]`` (optional)
             List of target action sequences for each element which lead to the correct denotation in
             worlds corresponding to the structured representations.
-        identifier : ``str`` (optional)
-            The identifier from the dataset if available.
         """
         # pylint: disable=arguments-differ
         worlds = [NlvrWorld(data) for data in structured_representations]
@@ -168,11 +165,9 @@ class NlvrDatasetReader(DatasetReader):
             production_rule_fields.append(field)
         action_field = ListField(production_rule_fields)
         worlds_field = ListField([MetadataField(world) for world in worlds])
-        fields: Dict[str, Field] = {"sentence": sentence_field,
-                                    "worlds": worlds_field,
-                                    "actions": action_field}
-        if identifier is not None:
-            fields["identifier"] = MetadataField(identifier)
+        fields = {"sentence": sentence_field,
+                  "worlds": worlds_field,
+                  "actions": action_field}
         # Depending on the type of supervision used for training the parser, we may want either
         # target action sequences or an agenda in our instance. We check if target sequences are
         # provided, and include them if they are. If not, we'll get an agenda for the sentence, and
@@ -200,3 +195,19 @@ class NlvrDatasetReader(DatasetReader):
             fields["labels"] = labels_field
 
         return Instance(fields)
+
+    @classmethod
+    def from_params(cls, params: Params) -> 'NlvrDatasetReader':
+        lazy = params.pop('lazy', False)
+        tokenizer = Tokenizer.from_params(params.pop('tokenizer', {}))
+        sentence_token_indexers = TokenIndexer.dict_from_params(params.pop('sentence_token_indexers', {}))
+        terminal_indexers = TokenIndexer.dict_from_params(params.pop('terminal_indexers', {}))
+        nonterminal_indexers = TokenIndexer.dict_from_params(params.pop('nonterminal_indexers', {}))
+        output_agendas = params.pop("output_agendas", True)
+        params.assert_empty(cls.__name__)
+        return NlvrDatasetReader(lazy=lazy,
+                                 tokenizer=tokenizer,
+                                 sentence_token_indexers=sentence_token_indexers,
+                                 terminal_indexers=terminal_indexers,
+                                 nonterminal_indexers=nonterminal_indexers,
+                                 output_agendas=output_agendas)

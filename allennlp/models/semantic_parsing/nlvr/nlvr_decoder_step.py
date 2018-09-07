@@ -4,6 +4,7 @@ from collections import defaultdict
 from overrides import overrides
 
 import torch
+from torch.autograd import Variable
 from torch.nn import Parameter
 from torch.nn.modules.rnn import LSTMCell
 from torch.nn.modules.linear import Linear
@@ -11,6 +12,7 @@ from torch.nn.modules.linear import Linear
 from allennlp.common import util as common_util
 from allennlp.models.semantic_parsing.nlvr.nlvr_decoder_state import NlvrDecoderState
 from allennlp.modules import Attention
+from allennlp.modules.similarity_functions import SimilarityFunction
 from allennlp.nn.decoding import DecoderStep, RnnState, ChecklistState
 from allennlp.nn import util as nn_util
 
@@ -21,7 +23,7 @@ class NlvrDecoderStep(DecoderStep[NlvrDecoderState]):
     ----------
     encoder_output_dim : ``int``
     action_embedding_dim : ``int``
-    input_attention : ``Attention``
+    attention_function : ``SimilarityFunction``
     dropout : ``float``
         Dropout to use on decoder outputs and before action prediction.
     use_coverage : ``bool``, optional (default=False)
@@ -31,11 +33,11 @@ class NlvrDecoderStep(DecoderStep[NlvrDecoderState]):
     def __init__(self,
                  encoder_output_dim: int,
                  action_embedding_dim: int,
-                 input_attention: Attention,
+                 attention_function: SimilarityFunction,
                  dropout: float = 0.0,
                  use_coverage: bool = False) -> None:
         super(NlvrDecoderStep, self).__init__()
-        self._input_attention = input_attention
+        self._input_attention = Attention(attention_function)
 
         # Decoder output dim needs to be the same as the encoder output dim since we initialize the
         # hidden state of the decoder with the final hidden state of the encoder.
@@ -93,7 +95,7 @@ class NlvrDecoderStep(DecoderStep[NlvrDecoderState]):
         # (group_size, decoder_input_dim)
         decoder_input = self._input_projection_layer(torch.cat([attended_sentence,
                                                                 previous_action_embedding], -1))
-        decoder_input = torch.tanh(decoder_input)
+        decoder_input = torch.nn.functional.tanh(decoder_input)
         hidden_state, memory_cell = self._decoder_cell(decoder_input, (hidden_state, memory_cell))
 
         hidden_state = self._dropout(hidden_state)
@@ -136,7 +138,7 @@ class NlvrDecoderStep(DecoderStep[NlvrDecoderState]):
         action_query = torch.cat([hidden_state, attended_sentence], dim=-1)
         # (group_size, action_embedding_dim)
         predicted_action_embedding = self._output_projection_layer(action_query)
-        predicted_action_embedding = self._dropout(torch.tanh(predicted_action_embedding))
+        predicted_action_embedding = self._dropout(torch.nn.functional.tanh(predicted_action_embedding))
         if state.checklist_state[0] is not None:
             embedding_addition = self._get_predicted_embedding_addition(state)
             addition = embedding_addition * self._checklist_embedding_multiplier
@@ -198,12 +200,12 @@ class NlvrDecoderStep(DecoderStep[NlvrDecoderState]):
         # computation, to global indices here.
         for batch_index, checklist_state in zip(state.batch_indices, state.checklist_state):
             global_terminal_indices.append([])
-            for terminal_index in checklist_state.terminal_actions.detach().cpu():
+            for terminal_index in checklist_state.terminal_actions.data.cpu():
                 global_terminal_index = state.action_indices[(batch_index, int(terminal_index[0]))]
                 global_terminal_indices[-1].append(global_terminal_index)
         # We don't need to pad this tensor because the terminal indices from all groups will be the
         # same size.
-        terminal_indices_tensor = state.score[0].new_tensor(global_terminal_indices, dtype=torch.long)
+        terminal_indices_tensor = Variable(state.score[0].data.new(global_terminal_indices)).long()
         group_size = len(state.batch_indices)
         action_embedding_dim = state.action_embeddings.size(-1)
         num_terminals = len(global_terminal_indices[0])
@@ -336,7 +338,7 @@ class NlvrDecoderStep(DecoderStep[NlvrDecoderState]):
         padded_actions = [common_util.pad_sequence_to_length(action_list, max_num_actions)
                           for action_list in actions_to_embed]
         # Shape: (group_size, num_actions)
-        action_tensor = state.score[0].new_tensor(padded_actions, dtype=torch.long)
+        action_tensor = Variable(state.score[0].data.new(padded_actions).long())
         # `state.action_embeddings` is shape (total_num_actions, action_embedding_dim).
         # We want to select from state.action_embeddings using `action_tensor` to get a tensor of
         # shape (group_size, num_actions, action_embedding_dim).  Unfortunately, the index_select
@@ -347,7 +349,7 @@ class NlvrDecoderStep(DecoderStep[NlvrDecoderState]):
         flattened_actions = action_tensor.view(-1)
         flattened_action_embeddings = state.action_embeddings.index_select(0, flattened_actions)
         action_embeddings = flattened_action_embeddings.view(group_size, max_num_actions, action_embedding_dim)
-        sequence_lengths = action_embeddings.new_tensor(num_actions)
+        sequence_lengths = Variable(action_embeddings.data.new(num_actions))
         action_mask = nn_util.get_mask_from_sequence_lengths(sequence_lengths, max_num_actions)
         return action_embeddings, action_mask
 
@@ -387,7 +389,7 @@ class NlvrDecoderStep(DecoderStep[NlvrDecoderState]):
         for batch_index, instance_states_info in states_info.items():
             batch_scores = torch.cat([info[-1] for info in instance_states_info])
             _, sorted_indices = batch_scores.sort(-1, descending=True)
-            sorted_states_info = [instance_states_info[i] for i in sorted_indices.detach().cpu().numpy()]
+            sorted_states_info = [instance_states_info[i] for i in sorted_indices.data.cpu().numpy()]
             allowed_states_info = []
             for i, (group_index, action_index, _, _) in enumerate(sorted_states_info):
                 action = considered_actions[group_index][action_index]

@@ -1,4 +1,5 @@
 import copy
+import os
 
 from numpy.testing import assert_allclose
 import torch
@@ -32,7 +33,7 @@ class ModelTestCase(AllenNlpTestCase):
             vocab = Vocabulary.from_instances(instances)
         self.vocab = vocab
         self.instances = instances
-        self.model = Model.from_params(vocab=self.vocab, params=params['model'])
+        self.model = Model.from_params(self.vocab, params['model'])
 
         # TODO(joelgrus) get rid of these
         # (a lot of the model tests use them, so they'll have to be changed)
@@ -43,8 +44,8 @@ class ModelTestCase(AllenNlpTestCase):
                                              param_file: str,
                                              tolerance: float = 1e-4,
                                              cuda_device: int = -1):
-        save_dir = self.TEST_DIR / "save_and_load_test"
-        archive_file = save_dir / "model.tar.gz"
+        save_dir = os.path.join(self.TEST_DIR, "save_and_load_test")
+        archive_file = os.path.join(save_dir, "model.tar.gz")
         model = train_model_from_file(param_file, save_dir)
         loaded_model = load_archive(archive_file, cuda_device=cuda_device).model
         state_keys = model.state_dict().keys()
@@ -111,9 +112,9 @@ class ModelTestCase(AllenNlpTestCase):
         return model, loaded_model
 
     def assert_fields_equal(self, field1, field2, name: str, tolerance: float = 1e-6) -> None:
-        if isinstance(field1, torch.Tensor):
-            assert_allclose(field1.detach().cpu().numpy(),
-                            field2.detach().cpu().numpy(),
+        if isinstance(field1, torch.autograd.Variable):
+            assert_allclose(field1.data.cpu().numpy(),
+                            field2.data.cpu().numpy(),
                             rtol=tolerance,
                             err_msg=name)
         elif isinstance(field1, dict):
@@ -147,13 +148,9 @@ class ModelTestCase(AllenNlpTestCase):
 
                 if parameter.grad is None:
                     has_zero_or_none_grads[name] = "No gradient computed (i.e parameter.grad is None)"
-
-                elif parameter.grad.is_sparse or parameter.grad.data.is_sparse:
-                    pass
-
                 # Some parameters will only be partially updated,
                 # like embeddings, so we just check that any gradient is non-zero.
-                elif (parameter.grad.cpu() == zeros).all():
+                elif (parameter.grad.data.cpu() == zeros).all():
                     has_zero_or_none_grads[name] = f"zeros with shape ({tuple(parameter.grad.size())})"
             else:
                 assert parameter.grad is None
@@ -168,22 +165,22 @@ class ModelTestCase(AllenNlpTestCase):
         single_predictions = []
         for i, instance in enumerate(self.instances):
             dataset = Batch([instance])
-            tensors = dataset.as_tensor_dict(dataset.get_padding_lengths())
+            tensors = dataset.as_tensor_dict(dataset.get_padding_lengths(), for_training=False)
             result = self.model(**tensors)
             single_predictions.append(result)
         full_dataset = Batch(self.instances)
-        batch_tensors = full_dataset.as_tensor_dict(full_dataset.get_padding_lengths())
+        batch_tensors = full_dataset.as_tensor_dict(full_dataset.get_padding_lengths(), for_training=False)
         batch_predictions = self.model(**batch_tensors)
         for i, instance_predictions in enumerate(single_predictions):
             for key, single_predicted in instance_predictions.items():
                 tolerance = 1e-6
-                if 'loss' in key:
+                if key == 'loss':
                     # Loss is particularly unstable; we'll just be satisfied if everything else is
                     # close.
                     continue
                 single_predicted = single_predicted[0]
                 batch_predicted = batch_predictions[key][i]
-                if isinstance(single_predicted, torch.Tensor):
+                if isinstance(single_predicted, torch.autograd.Variable):
                     if single_predicted.size() != batch_predicted.size():
                         slices = tuple(slice(0, size) for size in single_predicted.size())
                         batch_predicted = batch_predicted[slices]

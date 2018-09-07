@@ -1,18 +1,19 @@
 """
 The ``predict`` subcommand allows you to make bulk JSON-to-JSON
-or dataset to JSON predictions using a trained model and its
-:class:`~allennlp.service.predictors.predictor.Predictor` wrapper.
+predictions using a trained model and its :class:`~allennlp.service.predictors.predictor.Predictor` wrapper.
 
 .. code-block:: bash
 
-    $ allennlp predict -h
-    usage: allennlp predict [-h] [--output-file OUTPUT_FILE]
-                            [--weights-file WEIGHTS_FILE]
-                            [--batch-size BATCH_SIZE] [--silent]
-                            [--cuda-device CUDA_DEVICE] [--use-dataset-reader]
-                            [-o OVERRIDES] [--predictor PREDICTOR]
-                            [--include-package INCLUDE_PACKAGE]
-                            archive_file input_file
+    $ allennlp predict --help
+    usage: allennlp [command] predict [-h]
+                                      [--output-file OUTPUT_FILE]
+                                      [--batch-size BATCH_SIZE]
+                                      [--silent]
+                                      [--cuda-device CUDA_DEVICE]
+                                      [-o OVERRIDES]
+                                      [--include-package INCLUDE_PACKAGE]
+                                      [--predictor PREDICTOR]
+                                      archive_file input_file
 
     Run the specified model against a JSON-lines input file.
 
@@ -21,47 +22,137 @@ or dataset to JSON predictions using a trained model and its
     input_file            path to input file
 
     optional arguments:
-    -h, --help              show this help message and exit
+    -h, --help            show this help message and exit
     --output-file OUTPUT_FILE
                             path to output file
-    --weights-file WEIGHTS_FILE
-                            a path that overrides which weights file to use
-    --batch-size BATCH_SIZE The batch size to use for processing
-    --silent                do not print output to stdout
+    --batch-size BATCH_SIZE
+                            The batch size to use for processing
+    --silent              do not print output to stdout
     --cuda-device CUDA_DEVICE
                             id of GPU to use (if any)
-    --use-dataset-reader    Whether to use the dataset reader of the original
-                            model to load Instances
     -o OVERRIDES, --overrides OVERRIDES
-                            a JSON structure used to override the experiment
+                            a HOCON structure used to override the experiment
                             configuration
-    --predictor PREDICTOR   optionally specify a specific predictor to use
     --include-package INCLUDE_PACKAGE
                             additional packages to include
+    --predictor PREDICTOR
+                            optionally specify a specific predictor to use
 """
-from typing import List, Iterator, Optional
+
 import argparse
+from contextlib import ExitStack
 import sys
-import json
+from typing import Optional, IO
+from datetime import datetime
 
 from allennlp.commands.subcommand import Subcommand
-from allennlp.common.checks import check_for_gpu, ConfigurationError
-from allennlp.common.util import lazy_groups_of
 from allennlp.models.archival import load_archive
-from allennlp.predictors.predictor import Predictor, JsonDict
-from allennlp.data import Instance
+from allennlp.service.predictors import Predictor
+import json
+import PyPDF2
+import dill
+import pandas as pd
+from sklearn.model_selection import train_test_split
+from sklearn.feature_extraction.text import CountVectorizer
+from sklearn.feature_extraction.text import TfidfTransformer
+from sklearn.naive_bayes import MultinomialNB
+
 
 class Predict(Subcommand):
+     #reating a pdf file object
+    #print(datetime.now(),"  --  Start File Reading")
+    #pdfFileObj = open('EmployeeHandbook_January_2018.pdf', 'rb')
+     #pdfFileObj = open(origFileName, 'rb')
+  
+     # creating a pdf Reader object
+    #pdfReader = PyPDF2.PdfFileReader(pdfFileObj)
+  
+     # creating a pdf writer object for new pdf
+    #pdfWriter = PyPDF2.PdfFileWriter()
+    #emp_hb=[]
+     # rotating each page
+    #for page in range(pdfReader.numPages): 
+     # pageObj = pdfReader.getPage(page)
+      #emp_hb.append(pageObj.extractText())
+    
+   # global emp_handbook
+   # pdfFileObj.close()
+    #emp_handbook="".join(emp_hb)
+    #print(datetime.now(),"  --  Complete File Read")
+    
+    #def add_subparser(self, name: str, parser: argparse._SubParsersAction) -> argparse.ArgumentParser:
+       
+        #print ("Enter your question")
+        #question = input()
+        #print(datetime.now(), "  --  Time after entering Question")
+        #d={}
+        #d['distractor1']=""
+        #d['question']=question
+        #d['distractor3']=""
+        #d['passage']=emp_handbook
+        #d['correct_answer']=""
+        #d['distractor2']=""
+        #print (d)
+        #with open('data_emp_hb.jsonl', 'w') as outfile:
+         #   json.dump(d, outfile)
+
+    #global filename
+    #filename = 'category.pkl'
+    #dill.load_session(filename)
+    #cat = (clf.predict(count_vect.transform(["commitment"])))
+    #import pandas as pd
+    category = pd.read_csv('emp_hb_train_set.csv', header=None, encoding = 'unicode_escape')
+    category.columns = ['topic', 'description']
+
+    category = category.dropna()
+    category['category_id'] = category['topic'].factorize()[0]
+    category_id_df = category[['topic', 'category_id']].drop_duplicates().sort_values('category_id')
+    category_to_id = dict(category_id_df.values)
+    id_to_category = dict(category_id_df[['category_id', 'topic']].values)
+
+    category.head()
+    X_train, X_test, y_train, y_test = train_test_split(category['description'], category['topic'])
+    global count_vect
+    count_vect = CountVectorizer()
+    X_train_counts = count_vect.fit_transform(X_train)
+    tfidf_transformer = TfidfTransformer()
+    X_train_tfidf = tfidf_transformer.fit_transform(X_train_counts)
+    global clf
+    clf = MultinomialNB().fit(X_train_tfidf, y_train)
+
+
     def add_subparser(self, name: str, parser: argparse._SubParsersAction) -> argparse.ArgumentParser:
-        # pylint: disable=protected-access
+      
+        print ("Enter your question")
+        question = input()
+        cat = (clf.predict(count_vect.transform([question])))
+        #print(cat)
+        category = pd.read_csv('match_cat.csv', header=None, encoding = 'unicode_escape')
+        category.columns = ['topic', 'description']
+        category= category.dropna()
+        text_to_mrc =(category.loc[category['topic'] == cat[0]]['description'].item())
+        #print(text_to_mrc)
+        #hit=input("hit")
+        #text_to_mrc=text_to_mrc[0]
+        print (text_to_mrc)
+        d={}
+        d['distractor1']=""
+        d['question']=question
+        d['distractor3']=""
+        d['passage']=text_to_mrc
+        d['correct_answer']=""
+        d['distractor2']=""
+        #print (d)
+        with open('data_emp_hb_category.jsonl', 'w') as outfile:
+            json.dump(d, outfile)
         description = '''Run the specified model against a JSON-lines input file.'''
         subparser = parser.add_parser(
                 name, description=description, help='Use a trained model to make predictions.')
 
         subparser.add_argument('archive_file', type=str, help='the archived model to make predictions with')
-        subparser.add_argument('input_file', type=str, help='path to input file')
+        subparser.add_argument('input_file', type=argparse.FileType('r'), help='path to input file')
 
-        subparser.add_argument('--output-file', type=str, help='path to output file')
+        subparser.add_argument('--output-file', type=argparse.FileType('w'), help='path to output file')
         subparser.add_argument('--weights-file',
                                type=str,
                                help='a path that overrides which weights file to use')
@@ -74,14 +165,10 @@ class Predict(Subcommand):
         cuda_device = subparser.add_mutually_exclusive_group(required=False)
         cuda_device.add_argument('--cuda-device', type=int, default=-1, help='id of GPU to use (if any)')
 
-        subparser.add_argument('--use-dataset-reader',
-                               action='store_true',
-                               help='Whether to use the dataset reader of the original model to load Instances')
-
         subparser.add_argument('-o', '--overrides',
                                type=str,
                                default="",
-                               help='a JSON structure used to override the experiment configuration')
+                               help='a HOCON structure used to override the experiment configuration')
 
         subparser.add_argument('--predictor',
                                type=str,
@@ -92,101 +179,79 @@ class Predict(Subcommand):
         return subparser
 
 def _get_predictor(args: argparse.Namespace) -> Predictor:
-    check_for_gpu(args.cuda_device)
     archive = load_archive(args.archive_file,
                            weights_file=args.weights_file,
                            cuda_device=args.cuda_device,
                            overrides=args.overrides)
-
+    #oprint (archive) 
+    #hit =input("hit")
     return Predictor.from_archive(archive, args.predictor)
 
+def _run(predictor: Predictor,
+         input_file: IO,
+         output_file: Optional[IO],
+         batch_size: int,
+         print_to_console: bool) -> None:
 
-class _PredictManager:
-
-    def __init__(self,
-                 predictor: Predictor,
-                 input_file: str,
-                 output_file: Optional[str],
-                 batch_size: int,
-                 print_to_console: bool,
-                 has_dataset_reader: bool) -> None:
-
-        self._predictor = predictor
-        self._input_file = input_file
-        if output_file is not None:
-            self._output_file = open(output_file, "w")
-        else:
-            self._output_file = None
-        self._batch_size = batch_size
-        self._print_to_console = print_to_console
-        if has_dataset_reader:
-            self._dataset_reader = predictor._dataset_reader # pylint: disable=protected-access
-        else:
-            self._dataset_reader = None
-
-    def _predict_json(self, batch_data: List[JsonDict]) -> Iterator[str]:
+    def _run_predictor(batch_data):
+        #print(batch_data)
         if len(batch_data) == 1:
-            results = [self._predictor.predict_json(batch_data[0])]
+            result = predictor.predict_json(batch_data[0])
+            # Batch results return a list of json objects, so in
+            # order to iterate over the result below we wrap this in a list.
+            results = [result]
+            #print(results)
         else:
-            results = self._predictor.predict_batch_json(batch_data)
-        for output in results:
-            yield self._predictor.dump_line(output)
+            results = predictor.predict_batch_json(batch_data)
 
-    def _predict_instances(self, batch_data: List[Instance]) -> Iterator[str]:
-        if len(batch_data) == 1:
-            results = [self._predictor.predict_instance(batch_data[0])]
-        else:
-            results = self._predictor.predict_batch_instance(batch_data)
-        for output in results:
-            yield self._predictor.dump_line(output)
+        for model_input, output in zip(batch_data, results):
+                       
+            string_output = predictor.dump_line(output)
+            #print (type(string_output))
+            if print_to_console:
+                for key, value in output.items():
+                  if key=='best_span_str':
+                      print ("Answer: "+str(value))
+                      print(datetime.now(), "  --  Time after Answer")
 
-    def _maybe_print_to_console_and_file(self,
-                                         prediction: str,
-                                         model_input: str = None) -> None:
-        if self._print_to_console:
-            if model_input is not None:
-                print("input: ", model_input)
-            print("prediction: ", prediction)
-        if self._output_file is not None:
-            self._output_file.write(prediction)
+                #print("input: ", model_input)
+                #print("prediction: ", string_output)
+            if output_file:
+                output_file.write(string_output)
 
-    def _get_json_data(self) -> Iterator[JsonDict]:
-        for line in open(self._input_file):
-            if not line.isspace():
-                yield self._predictor.load_line(line)
+    batch_json_data = []
+    for line in input_file:
+        if not line.isspace():
+            # Collect batch size amount of data.
+            json_data = predictor.load_line(line)
+            batch_json_data.append(json_data)
+            if len(batch_json_data) == batch_size:
+                _run_predictor(batch_json_data)
+                batch_json_data = []
 
-    def _get_instance_data(self) -> Iterator[Instance]:
-        if self._dataset_reader is None:
-            raise ConfigurationError("To generate instances directly, pass a DatasetReader.")
-        else:
-            yield from self._dataset_reader.read(self._input_file)
-
-    def run(self) -> None:
-        has_reader = self._dataset_reader is not None
-        if has_reader:
-            for batch in lazy_groups_of(self._get_instance_data(), self._batch_size):
-                for result in self._predict_instances(batch):
-                    self._maybe_print_to_console_and_file(result)
-        else:
-            for batch_json in lazy_groups_of(self._get_json_data(), self._batch_size):
-                for model_input, result in zip(batch_json, self._predict_json(batch_json)):
-                    self._maybe_print_to_console_and_file(result, json.dumps(model_input))
-
-        if self._output_file is not None:
-            self._output_file.close()
+    # We might not have a dataset perfectly divisible by the batch size,
+    # so tidy up the scraps.
+    if batch_json_data:
+        _run_predictor(batch_json_data)
+    #print (batch_json_data)
 
 def _predict(args: argparse.Namespace) -> None:
     predictor = _get_predictor(args)
+    output_file = None
 
     if args.silent and not args.output_file:
         print("--silent specified without --output-file.")
         print("Exiting early because no output will be created.")
         sys.exit(0)
 
-    manager = _PredictManager(predictor,
-                              args.input_file,
-                              args.output_file,
-                              args.batch_size,
-                              not args.silent,
-                              args.use_dataset_reader)
-    manager.run()
+    # ExitStack allows us to conditionally context-manage `output_file`, which may or may not exist
+    with ExitStack() as stack:
+        input_file = stack.enter_context(args.input_file)  # type: ignore
+        if args.output_file:
+            output_file = stack.enter_context(args.output_file)  # type: ignore
+
+        _run(predictor,
+             input_file,
+             output_file,
+             args.batch_size,
+             not args.silent)

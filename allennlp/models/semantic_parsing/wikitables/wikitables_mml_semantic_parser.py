@@ -3,12 +3,15 @@ from typing import Any, Dict, List
 from overrides import overrides
 import torch
 
+from allennlp.common import Params
 from allennlp.data import Vocabulary
 from allennlp.data.fields.production_rule_field import ProductionRuleArray
 from allennlp.models.model import Model
 from allennlp.models.semantic_parsing.wikitables.wikitables_decoder_step import WikiTablesDecoderStep
 from allennlp.models.semantic_parsing.wikitables.wikitables_semantic_parser import WikiTablesSemanticParser
-from allennlp.modules import Attention, FeedForward, Seq2SeqEncoder, Seq2VecEncoder, TextFieldEmbedder
+from allennlp.modules import TextFieldEmbedder, Seq2SeqEncoder, FeedForward
+from allennlp.modules.seq2vec_encoders import Seq2VecEncoder
+from allennlp.modules.similarity_functions import SimilarityFunction
 from allennlp.nn.decoding import BeamSearch
 from allennlp.nn.decoding.decoder_trainers import MaximumMarginalLikelihood
 from allennlp.semparse.worlds import WikiTablesWorld
@@ -44,9 +47,10 @@ class WikiTablesMmlSemanticParser(WikiTablesSemanticParser):
     max_decoding_steps : ``int``
         When we're decoding with a beam search, what's the maximum number of steps we should take?
         This only applies at evaluation time, not during training. Passed to super class.
-    attention : ``Attention``
+    attention_function : ``SimilarityFunction``
         We compute an attention over the input question at each step of the decoder, using the
-        decoder hidden state as the query.  Passed to WikiTablesDecoderStep.
+        decoder hidden state as the query.  This is the similarity function we use for that
+        attention. Passed to super class.
     training_beam_size : ``int``, optional (default=None)
         If given, we will use a constrained beam search of this size during training, so that we
         use only the top ``training_beam_size`` action sequences according to the model in the MML
@@ -80,10 +84,10 @@ class WikiTablesMmlSemanticParser(WikiTablesSemanticParser):
                  action_embedding_dim: int,
                  encoder: Seq2SeqEncoder,
                  entity_encoder: Seq2VecEncoder,
+                 mixture_feedforward: FeedForward,
                  decoder_beam_search: BeamSearch,
                  max_decoding_steps: int,
-                 attention: Attention,
-                 mixture_feedforward: FeedForward = None,
+                 attention_function: SimilarityFunction,
                  training_beam_size: int = None,
                  use_neighbor_similarity_for_linking: bool = False,
                  dropout: float = 0.0,
@@ -106,7 +110,7 @@ class WikiTablesMmlSemanticParser(WikiTablesSemanticParser):
         self._decoder_trainer = MaximumMarginalLikelihood(training_beam_size)
         self._decoder_step = WikiTablesDecoderStep(encoder_output_dim=self._encoder.get_output_dim(),
                                                    action_embedding_dim=action_embedding_dim,
-                                                   input_attention=attention,
+                                                   attention_function=attention_function,
                                                    num_start_types=self._num_start_types,
                                                    num_entity_types=self._num_entity_types,
                                                    mixture_feedforward=mixture_feedforward,
@@ -119,8 +123,7 @@ class WikiTablesMmlSemanticParser(WikiTablesSemanticParser):
                 world: List[WikiTablesWorld],
                 actions: List[List[ProductionRuleArray]],
                 example_lisp_string: List[str] = None,
-                target_action_sequences: torch.LongTensor = None,
-                metadata: List[Dict[str, Any]] = None) -> Dict[str, torch.Tensor]:
+                target_action_sequences: torch.LongTensor = None) -> Dict[str, torch.Tensor]:
         # pylint: disable=arguments-differ
         """
         In this method we encode the table entities, link them to words in the question, then
@@ -146,16 +149,14 @@ class WikiTablesMmlSemanticParser(WikiTablesSemanticParser):
             ``ProductionRuleArray`` using a ``ProductionRuleField``.  We will embed all of these
             and use the embeddings to determine which action to take at each timestep in the
             decoder.
-        example_lisp_string : ``List[str]``, optional (default = None)
+        example_lisp_string : ``List[str]``, optional (default=None)
             The example (lisp-formatted) string corresponding to the given input.  This comes
             directly from the ``.examples`` file provided with the dataset.  We pass this to SEMPRE
             when evaluating denotation accuracy; it is otherwise unused.
-        target_action_sequences : torch.Tensor, optional (default = None)
+        target_action_sequences : torch.Tensor, optional (default=None)
            A list of possibly valid action sequences, where each action is an index into the list
            of possible actions.  This tensor has shape ``(batch_size, num_action_sequences,
            sequence_length)``.
-        metadata : ``List[Dict[str, Any]]``, optional, (default = None)
-            Metadata containing the original tokenized question within a 'question_tokens' key.
         """
         initial_info = self._get_initial_state_and_scores(question, table, world, actions)
         initial_state = initial_info["initial_state"]
@@ -216,8 +217,8 @@ class WikiTablesMmlSemanticParser(WikiTablesSemanticParser):
                         self._action_sequence_accuracy(sequence_in_targets)
                     action_strings = [action_mapping[(i, action_index)] for action_index in best_action_indices]
                     try:
-                        logical_form = world[i].get_logical_form(action_strings, add_var_function=False)
                         self._has_logical_form(1.0)
+                        logical_form = world[i].get_logical_form(action_strings, add_var_function=False)
                     except ParsingError:
                         self._has_logical_form(0.0)
                         logical_form = 'Error producing logical form'
@@ -232,7 +233,47 @@ class WikiTablesMmlSemanticParser(WikiTablesSemanticParser):
                     self._has_logical_form(0.0)
                     if example_lisp_string:
                         self._denotation_accuracy(None, example_lisp_string[i])
-            if metadata is not None:
-                outputs["question_tokens"] = [x["question_tokens"] for x in metadata]
-                outputs["original_table"] = [x["original_table"] for x in metadata]
             return outputs
+
+    @classmethod
+    def from_params(cls, vocab, params: Params) -> 'WikiTablesMmlSemanticParser':
+        question_embedder = TextFieldEmbedder.from_params(vocab, params.pop("question_embedder"))
+        action_embedding_dim = params.pop_int("action_embedding_dim")
+        encoder = Seq2SeqEncoder.from_params(params.pop("encoder"))
+        entity_encoder = Seq2VecEncoder.from_params(params.pop('entity_encoder'))
+        max_decoding_steps = params.pop_int("max_decoding_steps")
+        mixture_feedforward_type = params.pop('mixture_feedforward', None)
+        if mixture_feedforward_type is not None:
+            mixture_feedforward = FeedForward.from_params(mixture_feedforward_type)
+        else:
+            mixture_feedforward = None
+        decoder_beam_search = BeamSearch.from_params(params.pop("decoder_beam_search"))
+        # If no attention function is specified, we should not use attention, not attention with
+        # default similarity function.
+        attention_function_type = params.pop("attention_function", None)
+        if attention_function_type is not None:
+            attention_function = SimilarityFunction.from_params(attention_function_type)
+        else:
+            attention_function = None
+        training_beam_size = params.pop_int('training_beam_size', None)
+        use_neighbor_similarity_for_linking = params.pop_bool('use_neighbor_similarity_for_linking', False)
+        dropout = params.pop_float('dropout', 0.0)
+        num_linking_features = params.pop_int('num_linking_features', 10)
+        tables_directory = params.pop('tables_directory', '/wikitables/')
+        rule_namespace = params.pop('rule_namespace', 'rule_labels')
+        params.assert_empty(cls.__name__)
+        return cls(vocab,
+                   question_embedder=question_embedder,
+                   action_embedding_dim=action_embedding_dim,
+                   encoder=encoder,
+                   entity_encoder=entity_encoder,
+                   mixture_feedforward=mixture_feedforward,
+                   decoder_beam_search=decoder_beam_search,
+                   max_decoding_steps=max_decoding_steps,
+                   attention_function=attention_function,
+                   training_beam_size=training_beam_size,
+                   use_neighbor_similarity_for_linking=use_neighbor_similarity_for_linking,
+                   dropout=dropout,
+                   num_linking_features=num_linking_features,
+                   tables_directory=tables_directory,
+                   rule_namespace=rule_namespace)

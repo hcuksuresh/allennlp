@@ -16,14 +16,12 @@
   "model": {
     "type": "decomposable_attention",
     "text_field_embedder": {
-      "token_embedders": {
-        "tokens": {
-            "type": "embedding",
-            "projection_dim": 200,
-            "pretrained_file": "https://s3-us-west-2.amazonaws.com/allennlp/datasets/glove/glove.6B.300d.txt.gz",
-            "embedding_dim": 300,
-            "trainable": false
-        }
+      "tokens": {
+        "type": "embedding",
+        "projection_dim": 200,
+        "pretrained_file": "https://s3-us-west-2.amazonaws.com/allennlp/datasets/glove/glove.6B.300d.txt.gz",
+        "embedding_dim": 300,
+        "trainable": false
       }
     },
     "attend_feedforward": {
@@ -50,7 +48,7 @@
     },
      "initializer": [
       [".*linear_layers.*weight", {"type": "xavier_normal"}],
-      [".*token_embedder_tokens\\._projection.*weight", {"type": "xavier_normal"}]
+      [".*token_embedder_tokens\._projection.*weight", {"type": "xavier_normal"}]
      ]
    },
   "iterator": {

@@ -2,7 +2,7 @@
 Reader for WikitableQuestions (https://github.com/ppasupat/WikiTableQuestions/releases/tag/v1.0.2).
 """
 
-from typing import Dict, List, Any
+from typing import Dict, List, Union
 import gzip
 import json
 import logging
@@ -10,6 +10,7 @@ import os
 
 from overrides import overrides
 
+from allennlp.common import Params
 from allennlp.common.checks import ConfigurationError
 from allennlp.common.util import JsonDict
 from allennlp.data.dataset_readers.dataset_reader import DatasetReader
@@ -207,10 +208,8 @@ class WikiTablesDatasetReader(DatasetReader):
                             continue
                 else:
                     sempre_forms = None
-
-                table_lines = open(table_filename).readlines()
                 instance = self.text_to_instance(question=question,
-                                                 table_lines=table_lines,
+                                                 table_info=table_filename,
                                                  example_lisp_string=line,
                                                  dpd_output=sempre_forms)
                 if instance is not None:
@@ -235,21 +234,24 @@ class WikiTablesDatasetReader(DatasetReader):
     @overrides
     def text_to_instance(self,  # type: ignore
                          question: str,
-                         table_lines: List[str],
+                         table_info: Union[str, JsonDict],
                          example_lisp_string: str = None,
                          dpd_output: List[str] = None,
                          tokenized_question: List[Token] = None) -> Instance:
         """
         Reads text inputs and makes an instance. WikitableQuestions dataset provides tables as TSV
-        files, which we use for training.
+        files, which we use for training. For running a demo, we may want to provide tables in a
+        JSON format. To make this method compatible with both, we take ``table_info``, which can
+        either be a filename, or a dict. We check the argument's type and call the appropriate
+        method in ``TableQuestionKnowledgeGraph``.
 
         Parameters
         ----------
         question : ``str``
             Input question
-        table_lines : ``List[str]``
-            The table content itself, as a list of rows. See
-            ``TableQuestionKnowledgeGraph.read_from_lines`` for the expected format.
+        table_info : ``str`` or ``JsonDict``
+            Table filename or the table content itself, as a dict. See
+            ``TableQuestionKnowledgeGraph.read_from_json`` for the expected format.
         example_lisp_string : ``str``, optional
             The original (lisp-formatted) example string in the WikiTableQuestions dataset.  This
             comes directly from the ``.examples`` file provided with the dataset.  We pass this to
@@ -266,10 +268,13 @@ class WikiTablesDatasetReader(DatasetReader):
         # pylint: disable=arguments-differ
         tokenized_question = tokenized_question or self._tokenizer.tokenize(question.lower())
         question_field = TextField(tokenized_question, self._question_token_indexers)
-        metadata: Dict[str, Any] = {"question_tokens": [x.text for x in tokenized_question]}
-        metadata["original_table"] = "".join(table_lines)
-        table_knowledge_graph = TableQuestionKnowledgeGraph.read_from_lines(table_lines, tokenized_question)
-        table_metadata = MetadataField(table_lines)
+        if isinstance(table_info, str):
+            table_knowledge_graph = TableQuestionKnowledgeGraph.read_from_file(table_info,
+                                                                               tokenized_question)
+            table_metadata = MetadataField(open(table_info).readlines())
+        else:
+            table_knowledge_graph = TableQuestionKnowledgeGraph.read_from_json(table_info)
+            table_metadata = MetadataField(table_info)
         table_field = KnowledgeGraphField(table_knowledge_graph,
                                           tokenized_question,
                                           self._table_token_indexers,
@@ -289,7 +294,6 @@ class WikiTablesDatasetReader(DatasetReader):
         action_field = ListField(production_rule_fields)
 
         fields = {'question': question_field,
-                  'metadata': MetadataField(metadata),
                   'table': table_field,
                   'world': world_field,
                   'actions': action_field}
@@ -308,7 +312,7 @@ class WikiTablesDatasetReader(DatasetReader):
             for logical_form in dpd_output:
                 if not self._should_keep_logical_form(logical_form):
                     logger.debug(f'Question was: {question}')
-                    logger.debug(f'Table info was: {table_lines}')
+                    logger.debug(f'Table info was: {table_info}')
                     continue
                 try:
                     expression = world.parse_logical_form(logical_form)
@@ -316,7 +320,7 @@ class WikiTablesDatasetReader(DatasetReader):
                     logger.debug(f'Parsing error: {error.message}, skipping logical form')
                     logger.debug(f'Question was: {question}')
                     logger.debug(f'Logical form was: {logical_form}')
-                    logger.debug(f'Table info was: {table_lines}')
+                    logger.debug(f'Table info was: {table_info}')
                     continue
                 except:
                     logger.error(logical_form)
@@ -330,7 +334,7 @@ class WikiTablesDatasetReader(DatasetReader):
                 except KeyError as error:
                     logger.debug(f'Missing production rule: {error.args}, skipping logical form')
                     logger.debug(f'Question was: {question}')
-                    logger.debug(f'Table info was: {table_lines}')
+                    logger.debug(f'Table info was: {table_info}')
                     logger.debug(f'Logical form was: {logical_form}')
                     continue
                 if len(action_sequence_fields) >= self._max_dpd_logical_forms:
@@ -356,7 +360,6 @@ class WikiTablesDatasetReader(DatasetReader):
     def _json_blob_to_instance(self, json_obj: JsonDict) -> Instance:
         question_tokens = self._read_tokens_from_json_list(json_obj['question_tokens'])
         question_field = TextField(question_tokens, self._question_token_indexers)
-        question_metadata = MetadataField({"question_tokens": [x.text for x in question_tokens]})
         table_knowledge_graph = TableQuestionKnowledgeGraph.read_from_lines(json_obj['table_lines'],
                                                                             question_tokens)
         entity_tokens = [self._read_tokens_from_json_list(token_list)
@@ -383,7 +386,6 @@ class WikiTablesDatasetReader(DatasetReader):
         example_string_field = MetadataField(json_obj['example_lisp_string'])
 
         fields = {'question': question_field,
-                  'metadata': question_metadata,
                   'table': table_field,
                   'world': world_field,
                   'actions': action_field,
@@ -438,3 +440,38 @@ class WikiTablesDatasetReader(DatasetReader):
             logger.debug(f'Skipping logical form with inordinate number of "ors": {logical_form}')
             return False
         return True
+
+    @classmethod
+    def from_params(cls, params: Params) -> 'WikiTablesDatasetReader':
+        lazy = params.pop('lazy', False)
+        tables_directory = params.pop('tables_directory', None)
+        dpd_output_directory = params.pop('dpd_output_directory', None)
+        max_dpd_logical_forms = params.pop_int('max_dpd_logical_forms', 10)
+        sort_dpd_logical_forms = params.pop_bool('sort_dpd_logical_forms', True)
+        max_dpd_tries = params.pop_int('max_dpd_tries', 20)
+        keep_if_no_dpd = params.pop_bool('keep_if_no_dpd', False)
+        default_tokenizer_params = {'word_splitter': {'type': 'spacy', 'pos_tags': True}}
+        tokenizer = Tokenizer.from_params(params.pop('tokenizer', default_tokenizer_params))
+        question_token_indexers = TokenIndexer.dict_from_params(params.pop('question_token_indexers', {}))
+        table_token_indexers = TokenIndexer.dict_from_params(params.pop('table_token_indexers', {}))
+        use_table_for_vocab = params.pop_bool('use_table_for_vocab', False)
+        linking_feature_extracters = params.pop('linking_feature_extractors', None)
+        include_table_metadata = params.pop_bool('include_table_metadata', False)
+        max_table_tokens = params.pop_int('max_table_tokens', None)
+        output_agendas = params.pop_bool('output_agendas', False)
+        params.assert_empty(cls.__name__)
+        return WikiTablesDatasetReader(lazy=lazy,
+                                       tables_directory=tables_directory,
+                                       dpd_output_directory=dpd_output_directory,
+                                       max_dpd_logical_forms=max_dpd_logical_forms,
+                                       sort_dpd_logical_forms=sort_dpd_logical_forms,
+                                       max_dpd_tries=max_dpd_tries,
+                                       keep_if_no_dpd=keep_if_no_dpd,
+                                       tokenizer=tokenizer,
+                                       question_token_indexers=question_token_indexers,
+                                       table_token_indexers=table_token_indexers,
+                                       use_table_for_vocab=use_table_for_vocab,
+                                       linking_feature_extractors=linking_feature_extracters,
+                                       include_table_metadata=include_table_metadata,
+                                       max_table_tokens=max_table_tokens,
+                                       output_agendas=output_agendas)

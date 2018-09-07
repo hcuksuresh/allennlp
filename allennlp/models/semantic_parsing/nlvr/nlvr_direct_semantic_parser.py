@@ -5,11 +5,14 @@ from overrides import overrides
 
 import torch
 
+from allennlp.common import Params
 from allennlp.data.fields.production_rule_field import ProductionRuleArray
 from allennlp.data.vocabulary import Vocabulary
-from allennlp.modules import Attention, TextFieldEmbedder, Seq2SeqEncoder
+from allennlp.modules import TextFieldEmbedder, Seq2SeqEncoder
+from allennlp.modules.similarity_functions import SimilarityFunction
 from allennlp.nn.decoding import BeamSearch
 from allennlp.nn.decoding.decoder_trainers import MaximumMarginalLikelihood
+from allennlp.nn import util
 from allennlp.models.model import Model
 from allennlp.models.semantic_parsing.nlvr.nlvr_decoder_state import NlvrDecoderState
 from allennlp.models.semantic_parsing.nlvr.nlvr_decoder_step import NlvrDecoderStep
@@ -38,9 +41,10 @@ class NlvrDirectSemanticParser(NlvrSemanticParser):
         Passed to super-class.
     encoder : ``Seq2SeqEncoder``
         Passed to super-class.
-    attention : ``Attention``
+    attention_function : ``SimilarityFunction``
         We compute an attention over the input question at each step of the decoder, using the
-        decoder hidden state as the query.  Passed to the DecoderStep.
+        decoder hidden state as the query.  This is the similarity function we use for that
+        attention.
     decoder_beam_search : ``BeamSearch``
         Beam search used to retrieve best sequences after training.
     max_decoding_steps : ``int``
@@ -53,7 +57,7 @@ class NlvrDirectSemanticParser(NlvrSemanticParser):
                  sentence_embedder: TextFieldEmbedder,
                  action_embedding_dim: int,
                  encoder: Seq2SeqEncoder,
-                 attention: Attention,
+                 attention_function: SimilarityFunction,
                  decoder_beam_search: BeamSearch,
                  max_decoding_steps: int,
                  dropout: float = 0.0) -> None:
@@ -65,7 +69,7 @@ class NlvrDirectSemanticParser(NlvrSemanticParser):
         self._decoder_trainer = MaximumMarginalLikelihood()
         self._decoder_step = NlvrDecoderStep(encoder_output_dim=self._encoder.get_output_dim(),
                                              action_embedding_dim=action_embedding_dim,
-                                             input_attention=attention,
+                                             attention_function=attention_function,
                                              dropout=dropout)
         self._decoder_beam_search = decoder_beam_search
         self._max_decoding_steps = max_decoding_steps
@@ -76,7 +80,6 @@ class NlvrDirectSemanticParser(NlvrSemanticParser):
                 sentence: Dict[str, torch.LongTensor],
                 worlds: List[List[NlvrWorld]],
                 actions: List[List[ProductionRuleArray]],
-                identifier: List[str] = None,
                 target_action_sequences: torch.LongTensor = None,
                 labels: torch.LongTensor = None) -> Dict[str, torch.Tensor]:
         # pylint: disable=arguments-differ
@@ -88,7 +91,8 @@ class NlvrDirectSemanticParser(NlvrSemanticParser):
         action_embeddings, action_indices = self._embed_actions(actions)
 
         initial_rnn_state = self._get_initial_rnn_state(sentence)
-        initial_score_list = [next(iter(sentence.values())).new_zeros(1, dtype=torch.float)
+        initial_score_list = [util.new_variable_with_data(list(sentence.values())[0],
+                                                          torch.Tensor([0.0]))
                               for i in range(batch_size)]
         label_strings = self._get_label_strings(labels) if labels is not None else None
         # TODO (pradeep): Assuming all worlds give the same set of valid actions.
@@ -115,8 +119,6 @@ class NlvrDirectSemanticParser(NlvrSemanticParser):
             target_mask = None
 
         outputs: Dict[str, torch.Tensor] = {}
-        if identifier is not None:
-            outputs["identifier"] = identifier
         if target_action_sequences is not None:
             outputs = self._decoder_trainer.decode(initial_state,
                                                    self._decoder_step,
@@ -171,3 +173,27 @@ class NlvrDirectSemanticParser(NlvrSemanticParser):
                 'denotation_accuracy': self._denotation_accuracy.get_metric(reset),
                 'consistency': self._consistency.get_metric(reset)
         }
+
+    @classmethod
+    def from_params(cls, vocab, params: Params) -> 'NlvrDirectSemanticParser':
+        sentence_embedder_params = params.pop("sentence_embedder")
+        sentence_embedder = TextFieldEmbedder.from_params(vocab, sentence_embedder_params)
+        action_embedding_dim = params.pop_int('action_embedding_dim')
+        encoder = Seq2SeqEncoder.from_params(params.pop("encoder"))
+        dropout = params.pop_float('dropout', 0.0)
+        attention_function_type = params.pop("attention_function", None)
+        if attention_function_type is not None:
+            attention_function = SimilarityFunction.from_params(attention_function_type)
+        else:
+            attention_function = None
+        decoder_beam_search = BeamSearch.from_params(params.pop("decoder_beam_search"))
+        max_decoding_steps = params.pop_int("max_decoding_steps")
+        params.assert_empty(cls.__name__)
+        return cls(vocab,
+                   sentence_embedder=sentence_embedder,
+                   action_embedding_dim=action_embedding_dim,
+                   encoder=encoder,
+                   attention_function=attention_function,
+                   decoder_beam_search=decoder_beam_search,
+                   max_decoding_steps=max_decoding_steps,
+                   dropout=dropout)

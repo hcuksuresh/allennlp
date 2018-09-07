@@ -9,6 +9,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(os.path.join(__file__, os.par
 import gzip
 import numpy
 import torch
+from torch.autograd import Variable
 
 from allennlp.data.token_indexers import ELMoTokenCharactersIndexer
 from allennlp.modules.elmo import _ElmoCharacterEncoder
@@ -48,7 +49,7 @@ def main(vocab_path: str,
     tokens = [tokens[0]] + ["<S>", "</S>"] + tokens[1:]
 
     indexer = ELMoTokenCharactersIndexer()
-    indices = indexer.tokens_to_indices([Token(token) for token in tokens], Vocabulary(), "indices")["indices"]
+    indices = [indexer.token_to_indices(Token(token), Vocabulary()) for token in tokens]
     sentences = []
     for k in range((len(indices) // 50) + 1):
         sentences.append(indexer.pad_token_sequence(indices[(k * 50):((k + 1) * 50)],
@@ -67,9 +68,9 @@ def main(vocab_path: str,
     for i in range((len(sentences) // batch_size) + 1):
         array = numpy.array(sentences[i * batch_size: (i + 1) * batch_size])
         if device != -1:
-            batch = torch.from_numpy(array).cuda(device)
+            batch = Variable(torch.from_numpy(array).cuda(device))
         else:
-            batch = torch.from_numpy(array)
+            batch = Variable(torch.from_numpy(array))
 
         token_embedding = elmo_token_embedder(batch)['token_embedding'].data
 
